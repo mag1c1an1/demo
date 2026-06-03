@@ -1,0 +1,17 @@
+[project]
+name = "multi"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "datasets>=4.0.0",
+    "lakesoul",
+]
+
+[tool.uv.sources]
+lakesoul = { path = "lakesoul-1.2.0.dev0-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl" }
+
+[[tool.uv.index]]
+url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
+default = true
