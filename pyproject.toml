@@ -3,10 +3,10 @@ name = "multi"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.10"
 dependencies = [
-    "datasets>=4.0.0",
-    "lakesoul",
+    "httpx[socks]>=0.28.1",
+    "lakesoul[all]",
 ]
 
 [tool.uv.sources]

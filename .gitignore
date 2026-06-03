@@ -19,3 +19,9 @@ devenv.local.yaml
 
 # pre-commit
 .pre-commit-config.yaml
+
+data/
+*.jar
+*.tar.gz
+
+spark-warehouse/

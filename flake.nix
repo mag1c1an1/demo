@@ -12,13 +12,19 @@
     in
     {
       devShells.${system}.default = pkgs.mkShell {
-        packages = [
+        packages = with pkgs;[
+          stdenv.cc.cc.lib
+          zlib
         ];
 
         shellHook = ''
           echo "Python dev shell"
           echo "Python: $(python --version)"
           echo "uv: $(uv --version 2>/dev/null || true)"
+          export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath [
+                     pkgs.stdenv.cc.cc.lib
+                     pkgs.zlib
+                   ]}:$LD_LIBRARY_PATH
         '';
       };
     };
