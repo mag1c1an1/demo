@@ -25,3 +25,6 @@ data/
 *.tar.gz
 
 spark-warehouse/
+
+# Isolated feature workspaces
+.worktrees/
