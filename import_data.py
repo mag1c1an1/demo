@@ -1,150 +1,195 @@
-import json
-import re
-import xml.etree.ElementTree as ET
-from pathlib import Path
+from __future__ import annotations
 
-from pyspark.sql import SparkSession
-from pyspark.sql.types import (
-    ArrayType,
-    BinaryType,
-    IntegerType,
-    StringType,
-    StructField,
-    StructType,
+import argparse
+import json
+import os
+import re
+import time
+import xml.etree.ElementTree as ET
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Iterable, Iterator, Sequence, TypedDict
+from urllib.parse import urlparse
+
+from multimodal_data import (
+    BoundingBox,
+    ImageRecord,
+    canonical_record_digest_from_payloads,
+    canonical_record_payload,
+    select_filenames,
 )
 
-DATA_DIR = Path(__file__).resolve().parent / "data"
-IMAGES_DIR = DATA_DIR / "flickr30k-images"
-ANNOTATIONS_DIR = DATA_DIR / "Annotations"
-FILE_FORMAT = "vortex"
+PROJECT_DIR = Path(__file__).resolve().parent
+DATA_DIR = PROJECT_DIR / "data"
+JAR_NAME = "lakesoul-spark-3.3-3.0.0-SNAPSHOT.jar"
+
+
+class SourceValidation(TypedDict):
+    row_count: int
+    filenames: list[str]
+    digest: str
+    logical_blob_bytes: int
+
+
+class TableValidation(SourceValidation):
+    physical_bytes: int | None
+
+
+class WrittenTableValidation(TableValidation):
+    write_seconds: float
+
+
+class ImportResult(TypedDict):
+    source: SourceValidation
+    parquet: WrittenTableValidation
+    vortex: WrittenTableValidation
+
+
+@dataclass(frozen=True)
+class ImportConfig:
+    data_dir: Path
+    jar_path: Path
+    parquet_table: str
+    vortex_table: str
+    limit: int
+    batch_size: int
+    seed: int
+    overwrite: bool
+    output: Path
+
+    def __post_init__(self) -> None:
+        if self.parquet_table == self.vortex_table:
+            raise ValueError("parquet and vortex table names must be different")
+        if self.limit < 0:
+            raise ValueError("limit must be non-negative")
+        if self.batch_size <= 0:
+            raise ValueError("batch size must be positive")
+
+
+def alternating_formats(batch_index: int) -> tuple[str, str]:
+    return ("parquet", "vortex") if batch_index % 2 == 0 else (
+        "vortex",
+        "parquet",
+    )
+
+
+def ensure_targets_are_writable(*, existing: set[str], overwrite: bool) -> None:
+    if existing and not overwrite:
+        names = ", ".join(sorted(existing))
+        raise RuntimeError(f"target tables already exist: {names}; use --overwrite")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Import matching Parquet and Vortex LakeSoul tables"
+    )
+    parser.add_argument("--data-dir", type=Path, default=DATA_DIR)
+    parser.add_argument("--jar-path", type=Path, default=PROJECT_DIR / JAR_NAME)
+    parser.add_argument("--parquet-table", default="flickr30k_parquet")
+    parser.add_argument("--vortex-table", default="flickr30k_vortex")
+    parser.add_argument("--limit", type=int, default=1000)
+    parser.add_argument("--batch-size", type=int, default=100)
+    parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--output", type=Path, default=Path("benchmark-results/import.json")
+    )
+    return parser
 
 
 def get_int_text(parent, tag: str) -> int:
-    elem = parent.find(tag)
-    if elem is None or elem.text is None:
+    if parent is None:
+        raise ValueError(f"missing parent for {tag}")
+    element = parent.find(tag)
+    if element is None or element.text is None:
         raise ValueError(f"missing {tag}")
-    return int(elem.text)
+    return int(element.text)
 
 
-def parse_bboxes(xml_path: Path) -> list[dict]:
-    """Parse a Flickr30k Entities XML annotation file into a list of bbox dicts."""
-    tree = ET.parse(xml_path)
-    root = tree.getroot()
-    bboxes = []
+def parse_bboxes(xml_path: Path) -> list[BoundingBox]:
+    root = ET.parse(xml_path).getroot()
+    boxes = []
     for obj in root.findall("object"):
-        bndbox = obj.find("bndbox")
-        if bndbox is None:
-            continue  # skip scene/noobject entries
-        chain_ids = [n.text for n in obj.findall("name")]
-
-        bboxes.append(
-            {
-                "chain_ids": chain_ids,
-                "xmin": int(get_int_text(bndbox, "xmin")),
-                "ymin": int(get_int_text(bndbox, "ymin")),
-                "xmax": int(get_int_text(bndbox, "xmax")),
-                "ymax": int(get_int_text(bndbox, "ymax")),
-            }
+        bounds = obj.find("bndbox")
+        if bounds is None:
+            continue
+        chain_ids = tuple(
+            element.text
+            for element in obj.findall("name")
+            if element.text is not None
         )
-    return bboxes
+        boxes.append(
+            BoundingBox(
+                chain_ids=chain_ids,
+                xmin=get_int_text(bounds, "xmin"),
+                ymin=get_int_text(bounds, "ymin"),
+                xmax=get_int_text(bounds, "xmax"),
+                ymax=get_int_text(bounds, "ymax"),
+            )
+        )
+    return boxes
 
 
 def parse_image_size(xml_path: Path) -> tuple[int, int]:
-    """Return (width, height) from the XML annotation."""
-    tree = ET.parse(xml_path)
-    root = tree.getroot()
-    size = root.find("size")
-    return int(get_int_text(size, "width")), int(get_int_text(size, "height"))
+    size = ET.parse(xml_path).getroot().find("size")
+    return get_int_text(size, "width"), get_int_text(size, "height")
 
 
 def clean_caption(text: str) -> str:
-    """Strip <start>/<end> tags from a caption string."""
     return re.sub(r"</?start>|</?end>", "", text).strip()
 
 
-def write_table(spark, schema):
-    """Write Flickr30k data to LakeSoul table in batches to avoid OOM."""
-    with open(DATA_DIR / "dataset_flickr30k_allEN.json") as f:
-        captions_data = json.load(f)
-
-    BATCH_SIZE = 100
-    batch = []
-    total = 0
-    first_batch = True
-
-    for fname, raw_captions in captions_data.items():
-        img_path = IMAGES_DIR / fname
-        xml_path = ANNOTATIONS_DIR / f"{fname[:-4]}.xml"
-
-        if not img_path.exists() or not xml_path.exists():
-            continue
-
-        image_blob = img_path.read_bytes()
-        captions = [clean_caption(c) for c in raw_captions]
-        bboxes = parse_bboxes(xml_path)
-        width, height = parse_image_size(xml_path)
-
-        batch.append((fname, image_blob, width, height, captions, bboxes))
-        total += 1
-
-        if len(batch) >= BATCH_SIZE:
-            df = spark.createDataFrame(batch, schema)
-            if first_batch:
-                df.write.format("lakesoul").option(
-                    "file_format", FILE_FORMAT
-                ).saveAsTable("flickr30k")
-                first_batch = False
-            else:
-                df.write.mode("append").format("lakesoul").option(
-                    "file_format", FILE_FORMAT
-                ).saveAsTable("flickr30k")
-            print(f"Written {total} rows")
-            batch = []
-
-    # Write remaining
-    if batch:
-        df = spark.createDataFrame(batch, schema)
-        if first_batch:
-            df.write.format("lakesoul").option("file_format", FILE_FORMAT).saveAsTable(
-                "flickr30k"
-            )
-        else:
-            df.write.mode("append").format("lakesoul").option(
-                "file_format", FILE_FORMAT
-            ).saveAsTable("flickr30k")
-        print(f"Written {total} rows (done)")
-
-
-if __name__ == "__main__":
-    PROJECT_DIR = Path(__file__).resolve().parent
-    jar_path = str(PROJECT_DIR / "lakesoul-spark-3.3-3.0.0-SNAPSHOT.jar")
-    print(jar_path)
-    spark = (
-        SparkSession.builder.master("local[4]")
-        .config("spark.jars", jar_path)
-        .config(
-            "spark.sql.extensions",
-            "com.dmetasoul.lakesoul.sql.LakeSoulSparkSessionExtension",
-        )
-        .config(
-            "spark.sql.catalog.lakesoul",
-            "org.apache.spark.sql.lakesoul.catalog.LakeSoulCatalog",
-        )
-        .config("spark.sql.defaultCatalog", "lakesoul")
-        .config("spark.hadoop.fs.s3.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
-        .config("spark.hadoop.fs.s3a.buffer.dir", "/tmp/opt/spark/work-dir/s3a")
-        .config("spark.hadoop.fs.s3a.path.style.access", "true")
-        .config("spark.hadoop.fs.s3a.endpoint", "http://localhost:9000")
-        .config("spark.hadoop.fs.s3a.access.key", "rustfsadmin")
-        .config("spark.hadoop.fs.s3a.secret.key", "rustfsadmin")
-        .getOrCreate()
+def load_source_records(config: ImportConfig) -> Iterator[ImageRecord]:
+    captions_path = config.data_dir / "dataset_flickr30k_allEN.json"
+    captions_data = json.loads(captions_path.read_text())
+    selected = select_filenames(
+        captions_data.keys(), limit=config.limit, seed=config.seed
     )
-    spark.sparkContext.setLogLevel("ERROR")
+    for filename in selected:
+        image_path = config.data_dir / "flickr30k-images" / filename
+        xml_path = config.data_dir / "Annotations" / f"{Path(filename).stem}.xml"
+        if not image_path.is_file() or not xml_path.is_file():
+            raise FileNotFoundError(f"missing source files for {filename}")
+        width, height = parse_image_size(xml_path)
+        yield ImageRecord(
+            filename=filename,
+            image_bytes=image_path.read_bytes(),
+            width=width,
+            height=height,
+            captions=tuple(clean_caption(c) for c in captions_data[filename]),
+            bboxes=tuple(parse_bboxes(xml_path)),
+        )
 
-    # tablePath = "s3://lakesoul-test-bucket/titanic_raw"
-    # trainFilePath = "/opt/spark/work-dir/titanic/dataset/train.csv"
-    print("Debug -- Show tables before importing data")
-    spark.sql("drop table if exists flickr30k").show()
+
+def record_to_row(record: ImageRecord) -> tuple:
+    return (
+        record.filename,
+        record.image_bytes,
+        record.width,
+        record.height,
+        list(record.captions),
+        [
+            {
+                "chain_ids": list(box.chain_ids),
+                "xmin": box.xmin,
+                "ymin": box.ymin,
+                "xmax": box.xmax,
+                "ymax": box.ymax,
+            }
+            for box in record.bboxes
+        ],
+    )
+
+
+def lake_soul_schema():
+    from pyspark.sql.types import (
+        ArrayType,
+        BinaryType,
+        IntegerType,
+        StringType,
+        StructField,
+        StructType,
+    )
 
     bbox_schema = StructType(
         [
@@ -155,7 +200,7 @@ if __name__ == "__main__":
             StructField("ymax", IntegerType(), False),
         ]
     )
-    schema = StructType(
+    return StructType(
         [
             StructField("filename", StringType(), False),
             StructField("image_blob", BinaryType(), False),
@@ -166,5 +211,258 @@ if __name__ == "__main__":
         ]
     )
 
-    write_table(spark, schema)
-    spark.stop()
+
+def create_spark_session(jar_path: Path):
+    from pyspark.sql import SparkSession
+
+    spark = (
+        SparkSession.builder.master("local[4]")
+        .appName("lakesoul-multimodal-import")
+        .config("spark.jars", str(jar_path))
+        .config(
+            "spark.sql.extensions",
+            "com.dmetasoul.lakesoul.sql.LakeSoulSparkSessionExtension",
+        )
+        .config(
+            "spark.sql.catalog.lakesoul",
+            "org.apache.spark.sql.lakesoul.catalog.LakeSoulCatalog",
+        )
+        .config("spark.sql.defaultCatalog", "lakesoul")
+        .config("spark.sql.warehouse.dir", str(PROJECT_DIR / "spark-warehouse"))
+        .getOrCreate()
+    )
+    spark.sparkContext.setLogLevel("ERROR")
+    return spark
+
+
+def write_batch(
+    spark,
+    schema,
+    rows: list[tuple],
+    *,
+    table_name: str,
+    file_format: str,
+    first_batch: bool,
+) -> float:
+    started = time.perf_counter_ns()
+    writer = spark.createDataFrame(rows, schema).write.format("lakesoul")
+    writer = writer.option("file_format", file_format)
+    if not first_batch:
+        writer = writer.mode("append")
+    writer.saveAsTable(table_name)
+    return (time.perf_counter_ns() - started) / 1_000_000_000
+
+
+def iter_lakesoul_records(
+    table_name: str, *, batch_size: int = 1024
+) -> Iterator[ImageRecord]:
+    from data_backends import arrow_batch_to_records
+    from lakesoul.arrow.dataset import lakesoul_dataset
+
+    dataset = lakesoul_dataset(table_name, batch_size=batch_size)
+    columns = [
+        "filename",
+        "image_blob",
+        "width",
+        "height",
+        "captions",
+        "bboxes",
+    ]
+    for batch in dataset.to_batches(columns=columns, batch_size=batch_size):
+        yield from arrow_batch_to_records(batch)
+
+
+def _physical_table_bytes(table_name: str) -> int | None:
+    from lakesoul.arrow.dataset import lakesoul_dataset
+
+    total = 0
+    found = False
+    for group in lakesoul_dataset(table_name).file_urls():
+        for url in group:
+            parsed = urlparse(url)
+            path = Path(parsed.path if parsed.scheme == "file" else url)
+            if parsed.scheme not in ("", "file") or not path.is_file():
+                continue
+            total += path.stat().st_size
+            found = True
+    return total if found else None
+
+
+def validate_table(table_name: str) -> TableValidation:
+    row_count = 0
+    filenames = []
+    logical_blob_bytes = 0
+    payloads = []
+    for record in iter_lakesoul_records(table_name):
+        row_count += 1
+        filenames.append(record.filename)
+        logical_blob_bytes += len(record.image_bytes)
+        payloads.append(
+            (record.filename, canonical_record_payload(record))
+        )
+    return {
+        "row_count": row_count,
+        "filenames": sorted(filenames),
+        "digest": canonical_record_digest_from_payloads(payloads),
+        "logical_blob_bytes": logical_blob_bytes,
+        "physical_bytes": _physical_table_bytes(table_name),
+    }
+
+
+def _with_write_seconds(
+    validation: TableValidation, write_seconds: float
+) -> WrittenTableValidation:
+    return {
+        "row_count": validation["row_count"],
+        "filenames": validation["filenames"],
+        "digest": validation["digest"],
+        "logical_blob_bytes": validation["logical_blob_bytes"],
+        "physical_bytes": validation["physical_bytes"],
+        "write_seconds": write_seconds,
+    }
+
+
+def _batched(records: Iterable[ImageRecord], size: int) -> Iterator[list[ImageRecord]]:
+    batch: list[ImageRecord] = []
+    for record in records:
+        batch.append(record)
+        if len(batch) == size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
+def import_records(
+    spark,
+    records: Iterable[ImageRecord],
+    *,
+    parquet_table: str,
+    vortex_table: str,
+    batch_size: int,
+) -> ImportResult:
+    if parquet_table == vortex_table:
+        raise ValueError("parquet and vortex table names must be different")
+    schema = lake_soul_schema()
+    source_filenames: list[str] = []
+    source_payloads: list[tuple[str, bytes]] = []
+    source_blob_bytes = 0
+    write_seconds = {"parquet": 0.0, "vortex": 0.0}
+    tables = {"parquet": parquet_table, "vortex": vortex_table}
+    wrote_any = False
+
+    for batch_index, batch in enumerate(_batched(records, batch_size)):
+        source_filenames.extend(record.filename for record in batch)
+        source_payloads.extend(
+            (record.filename, canonical_record_payload(record))
+            for record in batch
+        )
+        source_blob_bytes += sum(len(record.image_bytes) for record in batch)
+        rows = [record_to_row(record) for record in batch]
+        for file_format in alternating_formats(batch_index):
+            write_seconds[file_format] += write_batch(
+                spark,
+                schema,
+                rows,
+                table_name=tables[file_format],
+                file_format=file_format,
+                first_batch=batch_index == 0,
+            )
+        wrote_any = True
+
+    if not wrote_any:
+        raise ValueError("no source records selected")
+
+    source: SourceValidation = {
+        "row_count": len(source_filenames),
+        "filenames": sorted(source_filenames),
+        "digest": canonical_record_digest_from_payloads(source_payloads),
+        "logical_blob_bytes": source_blob_bytes,
+    }
+    parquet = _with_write_seconds(
+        validate_table(parquet_table), write_seconds["parquet"]
+    )
+    vortex = _with_write_seconds(
+        validate_table(vortex_table), write_seconds["vortex"]
+    )
+    if not (
+        source["digest"] == parquet["digest"] == vortex["digest"]
+        and source["filenames"] == parquet["filenames"] == vortex["filenames"]
+    ):
+        raise RuntimeError("source, Parquet, and Vortex table contents differ")
+    return {"source": source, "parquet": parquet, "vortex": vortex}
+
+
+def _atomic_write_json(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    temporary.replace(path)
+
+
+def _config_from_args(args: argparse.Namespace) -> ImportConfig:
+    return ImportConfig(
+        data_dir=args.data_dir,
+        jar_path=args.jar_path,
+        parquet_table=args.parquet_table,
+        vortex_table=args.vortex_table,
+        limit=args.limit,
+        batch_size=args.batch_size,
+        seed=args.seed,
+        overwrite=args.overwrite,
+        output=args.output,
+    )
+
+
+def _validate_paths(config: ImportConfig) -> None:
+    required = [
+        config.jar_path,
+        config.data_dir / "dataset_flickr30k_allEN.json",
+        config.data_dir / "flickr30k-images",
+        config.data_dir / "Annotations",
+    ]
+    missing = [str(path) for path in required if not path.exists()]
+    if missing:
+        raise FileNotFoundError("required paths are absent: " + ", ".join(missing))
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    config = _config_from_args(build_parser().parse_args(argv))
+    _validate_paths(config)
+    spark = create_spark_session(config.jar_path)
+    try:
+        targets = {config.parquet_table, config.vortex_table}
+        existing = {name for name in targets if spark.catalog.tableExists(name)}
+        ensure_targets_are_writable(existing=existing, overwrite=config.overwrite)
+        if config.overwrite:
+            for table_name in targets:
+                spark.sql(f"DROP TABLE IF EXISTS `{table_name}`")
+        result = import_records(
+            spark,
+            load_source_records(config),
+            parquet_table=config.parquet_table,
+            vortex_table=config.vortex_table,
+            batch_size=config.batch_size,
+        )
+    finally:
+        spark.stop()
+
+    payload = {
+        "config": {
+            **asdict(config),
+            "data_dir": str(config.data_dir),
+            "jar_path": str(config.jar_path),
+            "output": str(config.output),
+        },
+        "tables": result,
+    }
+    _atomic_write_json(config.output, payload)
+    print(
+        f"Imported {result['source']['row_count']} images into "
+        f"{config.parquet_table} and {config.vortex_table}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

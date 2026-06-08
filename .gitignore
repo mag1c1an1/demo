@@ -28,3 +28,8 @@ spark-warehouse/
 
 # Isolated feature workspaces
 .worktrees/
+
+# Demo outputs
+benchmark-results*/
+clip-flickr30k-finetuned/
+.pytest_cache/

@@ -1,15 +1,29 @@
 [project]
 name = "multi"
 version = "0.1.0"
-description = "Add your description here"
+description = "LakeSoul multimodal storage and training benchmark"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.11"
 dependencies = [
+    "daft[ray]",
     "httpx[socks]>=0.28.1",
     "lakesoul[all]",
+    "matplotlib>=3.9,<4",
     "pillow>=12.2.0",
-    "transformers>=4.45,<5.0"
+    "transformers>=4.45,<5.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3,<9",
+    "pytest-timeout>=2.3,<3",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: requires Spark, LakeSoul metadata, and local table storage",
+]
+testpaths = ["tests"]
 
 [tool.uv.sources]
 lakesoul = { path = "lakesoul-1.2.0.dev0-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl" }
