@@ -5,12 +5,15 @@ description = "LakeSoul multimodal storage and training benchmark"
 readme = "README.md"
 requires-python = ">=3.10,<3.11"
 dependencies = [
+    "av>=17.1.0",
     "daft[ray]",
     "httpx[socks]>=0.28.1",
-    "lakesoul[all]",
-    "matplotlib>=3.9,<4",
-    "pillow>=12.2.0",
-    "transformers>=4.45,<5.0",
+    "ipykernel>=7.3.0",
+    "ipywidgets>=8.1.8",
+    "lakesoul[ray]",
+    # "matplotlib>=3.9,<4",
+    # "pillow>=12.2.0",
+    # "transformers>=4.45,<5.0",
 ]
 
 [dependency-groups]
@@ -25,9 +28,9 @@ markers = [
 ]
 testpaths = ["tests"]
 
-[tool.uv.sources]
-lakesoul = { path = "lakesoul-1.2.0.dev0-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl" }
-
 [[tool.uv.index]]
 url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 default = true
+
+[tool.uv.sources]
+lakesoul = { path = "lakesoul-1.2.0.dev0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl" }

@@ -1,0 +1,29 @@
+{
+  "config": {
+    "batch_size": 32,
+    "concurrency": 1,
+    "daft_runner": "native",
+    "ffmpeg_bin": "ffmpeg",
+    "ffprobe_bin": "ffprobe",
+    "file_format": "parquet",
+    "jar_path": "/home/maji/data/Projects/multi/lakesoul-spark-3.3-3.0.0-SNAPSHOT.jar",
+    "limit": 0,
+    "media_timeout": 30.0,
+    "output": "/home/maji/data/Projects/multi/video-import.json",
+    "overwrite": true,
+    "ray_address": "local",
+    "skip_corrupt": true,
+    "source_dir": "/home/maji/data/Projects/multi/video/data/UCF101_subset",
+    "table": "ucf101_videos",
+    "thumbnail_dir": "/home/maji/data/Projects/multi/video/data/UCF101_thumbnails",
+    "thumbnail_second": 1.0
+  },
+  "summary": {
+    "digest": "b6704037c5998426d58a82ff83336440fa872cf09c63150afb998ae6f0ff5e9a",
+    "discovered_rows": 405,
+    "imported_rows": 405,
+    "skipped_rows": 0,
+    "thumbnail_bytes": 4037767,
+    "write_seconds": 0.1920588
+  }
+}

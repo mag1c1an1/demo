@@ -33,3 +33,5 @@ spark-warehouse/
 benchmark-results*/
 clip-flickr30k-finetuned/
 .pytest_cache/
+
+**/data
