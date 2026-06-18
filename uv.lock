@@ -498,6 +498,9 @@ wheels = [
 ]
 
 [package.optional-dependencies]
+pyspark = [
+    { name = "pyspark" },
+]
 ray = [
     { name = "ray" },
 ]
@@ -565,7 +568,7 @@ dependencies = [
     { name = "httpx", extra = ["socks"] },
     { name = "ipykernel" },
     { name = "ipywidgets" },
-    { name = "lakesoul", extra = ["ray"] },
+    { name = "lakesoul", extra = ["pyspark", "ray"] },
 ]
 
 [package.dev-dependencies]
@@ -581,7 +584,7 @@ requires-dist = [
     { name = "httpx", extras = ["socks"], specifier = ">=0.28.1" },
     { name = "ipykernel", specifier = ">=7.3.0" },
     { name = "ipywidgets", specifier = ">=8.1.8" },
-    { name = "lakesoul", extras = ["ray"], path = "lakesoul-1.2.0.dev0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl" },
+    { name = "lakesoul", extras = ["ray", "pyspark"], path = "lakesoul-1.2.0.dev0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl" },
 ]
 
 [package.metadata.requires-dev]
@@ -752,6 +755,15 @@ wheels = [
 ]
 
 [[package]]
+name = "py4j"
+version = "0.10.9.5"
+source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple" }
+sdist = { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/ce/1f/b00295b6da3bd2f050912b9f71fdb436ae8f1601cf161365937d8553e24b/py4j-0.10.9.5.tar.gz", hash = "sha256:276a4a3c5a2154df1860ef3303a927460e02e97b047dc0a47c1c3fb8cce34db6", size = 761259, upload-time = "2022-03-18T01:06:29.681Z" }
+wheels = [
+    { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/86/ec/60880978512d5569ca4bf32b3b4d7776a528ecf4bca4523936c98c92a3c8/py4j-0.10.9.5-py2.py3-none-any.whl", hash = "sha256:52d171a6a2b031d8a5d1de6efe451cf4f5baff1a2819aabc3741c8406539ba04", size = 199724, upload-time = "2022-03-18T01:06:27.762Z" },
+]
+
+[[package]]
 name = "pyarrow"
 version = "20.0.0"
 source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple" }
@@ -785,6 +797,15 @@ sdist = { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/c3/b2/bc
 wheels = [
     { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/f4/7e/a72dd26f3b0f4f2bf1dd8923c85f7ceb43172af56d63c7383eb62b332364/pygments-2.20.0-py3-none-any.whl", hash = "sha256:81a9e26dd42fd28a23a2d169d86d7ac03b46e2f8b59ed4698fb4785f946d0176", size = 1231151, upload-time = "2026-03-29T13:29:30.038Z" },
 ]
+
+[[package]]
+name = "pyspark"
+version = "3.3.1"
+source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple" }
+dependencies = [
+    { name = "py4j" },
+]
+sdist = { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/d1/48/cc321e742a93320c681b3c7a9fd405d518c6326c89da3d67e35b9868e941/pyspark-3.3.1.tar.gz", hash = "sha256:e99fa7de92be406884bfd831c32b9306a3a99de44cfc39a2eefb6ed07445d5fa", size = 281393542, upload-time = "2022-10-25T07:47:50.596Z" }
 
 [[package]]
 name = "pytest"
